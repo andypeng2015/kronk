@@ -162,9 +162,11 @@ export const PARAM_TOOLTIPS = {
   budgetReservationVRAM: 'Bytes charged against discrete GPU VRAM budgets. Zero on systems with no GPU and on Apple Silicon unified memory (where the GPU shares the system pool).',
   budgetReservationSystem: 'Bytes charged against the system-memory budget. On unified-memory systems (Apple Silicon Metal) the entire model footprint is charged here because the GPU and CPU share one physical pool.',
   budgetReservationPerDevice: 'Per-device byte allocation for this reservation. Populated when the reservation was split across multiple GPUs via tensor-split. Empty (—) when the reservation is on a single device or on system memory.',
+  budgetReservationUnified: 'Bytes charged against the unified memory budget. On Apple Silicon the GPU (Metal) and CPU share a single physical pool, so the resman tracks one combined number instead of splitting VRAM from system memory (which would double-count the same bytes).',
 
   // Running models grid tooltips
   runningModelID: 'Cache key for the loaded model. Catalog models use the model ID directly; playground/custom sessions use modelID/playground/<session-id>.',
+  runningModelBackend: 'Which pool owns this entry. "kronk" is the llama.cpp pool (chat / embed / rerank / vision / audio LLMs); "bucky" is the whisper.cpp pool (speech-to-text via /v1/audio/transcriptions). Both pools share the same resource manager.',
   runningModelOwner: 'Publisher namespace from the model file path (e.g. unsloth, google, meta-llama).',
   runningModelFamily: 'Model family / repo name as it appears in the catalog.',
   runningModelSize: 'On-disk size of the GGUF file(s) backing this model.',
@@ -184,6 +186,14 @@ export const PARAM_TOOLTIPS = {
   peerLibsConnect: 'Query the peer Kronk server for the list of library bundles it has installed and is willing to share.',
   peerLibsDownload: 'Download this library bundle from the peer over the local network. The peer builds a zip on demand on first request, sends it with a sha256 digest for integrity verification, and the zip is unpacked into the matching bundle directory on this server.',
   peerKMSHost: 'Address of another Kronk server on the local network in the form ip:port. Connect to list the models that peer has downloaded and pull any of them into this server. The peer must be running with the download endpoint enabled.',
+
+  // Translator
+  translatorModel: 'Installed whisper.cpp model to use for this run. Multilingual models (e.g. ggml-large-v3) can transcribe many languages and translate any of them to English. English-only models (filenames containing ".en") only accept English audio and cannot translate.',
+  translatorSourceLanguage: 'Hint for the language spoken in the audio. Leave on "Auto-detect" to let whisper identify the language from the first ~30 seconds. Set explicitly for short clips, heavy accents, or when auto-detect picks the wrong language.',
+  translatorTranslate: 'When on, whisper translates the source audio to English instead of transcribing in the source language. Whisper can only translate to English — no other target languages are supported by the model. Disabled for English-only models.',
+  translatorPrompt: 'Optional text passed to whisper as decoder context. Useful to bias spelling of proper nouns, technical terms, or to provide style/punctuation hints. Keep it short (a sentence or two).',
+  translatorRealtimeFactor: 'Audio duration divided by wall-clock time. A value of 5x means the run processed 5 seconds of audio per second of real time. Higher is faster.',
+  translatorNoSpeechProb: 'Whisper\'s estimated probability that this segment contains no speech. Values close to 1 typically indicate silence or background noise.',
 } as const satisfies Record<string, string>;
 
 export type TooltipKey = keyof typeof PARAM_TOOLTIPS;
