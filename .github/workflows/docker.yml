@@ -163,14 +163,13 @@ jobs:
           # Variant catalogue. Keep in sync with the table in the header
           # comment above and with zarf/docker/kronk/Dockerfile.
           # -------------------------------------------------------------------
-          ALL_VARIANTS=(cpu cuda vulkan rocm jetson all)
+          ALL_VARIANTS=(cpu cuda vulkan rocm all)
 
           declare -A PLATFORMS=(
             [cpu]="amd64 arm64"
             [cuda]="amd64 arm64"
             [vulkan]="amd64 arm64"
             [rocm]="amd64"
-            [jetson]="arm64"
             [all]="amd64 arm64"
           )
           declare -A TARGET=(
@@ -178,7 +177,6 @@ jobs:
             [cuda]=runtime
             [vulkan]=runtime
             [rocm]=runtime
-            [jetson]=runtime-jetson
             [all]=runtime
           )
           # Whitespace-separated processor lists fed to LLAMA_PROCESSORS in
@@ -189,7 +187,6 @@ jobs:
             [cuda]="cuda"
             [vulkan]="vulkan"
             [rocm]="rocm"
-            [jetson]="cuda"
             [all]="cpu cuda vulkan rocm"
           )
           # Whitespace-separated processor lists fed to BUCKY_PROCESSORS
@@ -204,7 +201,6 @@ jobs:
             [cuda]="cuda"
             [vulkan]="vulkan"
             [rocm]="vulkan"
-            [jetson]="cuda"
             [all]="cpu cuda vulkan"
           )
 
