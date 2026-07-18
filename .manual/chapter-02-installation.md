@@ -248,24 +248,29 @@ llama.cpp processor backends for LLM inference, the matching whisper.cpp
 (bucky) backend for audio transcription via `/v1/audio/transcriptions`,
 and `ffmpeg` for decoding non-PCM audio uploads — so the image is
 offline-ready after the first pull (models still need to be downloaded
-separately into the persisted `/kronk` volume). Six variants are produced;
+separately into the persisted `/kronk` volume). Five variants are produced;
 pick the one that matches your hardware:
 
-| Tag suffix | Hardware target                                 | Platforms                    |
-| ---------- | ----------------------------------------------- | ---------------------------- |
-| `-cpu`     | Any host, no GPU acceleration (smallest image)  | `linux/amd64`, `linux/arm64` |
-| `-cuda`    | NVIDIA GPUs (Linux + Windows-WSL2)              | `linux/amd64`, `linux/arm64` |
-| `-vulkan`  | Vendor-neutral GPU (AMD / NVIDIA / Intel)       | `linux/amd64`, `linux/arm64` |
-| `-rocm`    | AMD GPUs via ROCm                               | `linux/amd64`                |
-| `-jetson`  | NVIDIA Jetson Orin / Xavier (JetPack 6+)        | `linux/arm64`                |
-| `-all`     | Bundles cpu + cuda + vulkan + rocm in one image | `linux/amd64`, `linux/arm64` |
+| Tag           | Hardware target                                 | Platforms                    |
+| ------------- | ----------------------------------------------- | ---------------------------- |
+| `latest-cpu`  | Any host, no GPU acceleration (smallest image)  | `linux/amd64`, `linux/arm64` |
+| `latest-cuda` | NVIDIA GPUs (Linux + Windows-WSL2)              | `linux/amd64`, `linux/arm64` |
+| `latest-vulkan` | Vendor-neutral GPU (AMD / NVIDIA / Intel)     | `linux/amd64`, `linux/arm64` |
+| `latest-rocm` | AMD GPUs via ROCm                               | `linux/amd64`                |
+| `latest-all`  | Bundles cpu + cuda + vulkan + rocm in one image | `linux/amd64`, `linux/arm64` |
+
+NVIDIA Jetson (Orin / Xavier) is not part of the published set; build it on
+demand with `--target runtime-jetson` as documented in the
+[`Dockerfile`](../zarf/docker/kronk/Dockerfile) header.
 
 Tag scheme:
 
+- `:latest-<variant>` (e.g. `:latest-cuda`) — floats to the newest release of
+  that variant.
+- `:latest` — the CPU image (alias of `:latest-cpu`), the only variant
+  guaranteed to run anywhere. For GPUs use `:latest-cuda` / `:latest-vulkan` /
+  `:latest-rocm`.
 - `:vX.Y.Z-<variant>` — immutable, tied to a released version (recommended for production).
-- `:latest-<variant>` — floats to the latest release of that variant.
-- `:latest` — alias of `:latest-cpu` (the only variant guaranteed to run anywhere).
-- `:main-<shortsha>-<variant>` — bleeding-edge builds from `main`.
 
 Pull and run (CPU on any host):
 
@@ -305,6 +310,199 @@ matrix has no rocm bundle, so the rocm image ships the **vulkan** bucky
 bundle instead and the container entrypoint transparently points
 `KRONK_BUCKY_LIB_PATH` at it on ROCm hosts. Transcription therefore
 stays GPU-accelerated on AMD GPUs via the RADV Vulkan driver.
+
+**Running headless on a remote machine.** The examples above use
+`--rm`, which deletes the container on stop — fine for a quick trial,
+wrong for a server. For an unattended host, run detached with a restart
+policy and a named volume so state on `/kronk` survives crashes and
+reboots. Inside the container Kronk runs as UID/GID `10001` and stores
+everything (models, catalog, keys, libraries) under `/kronk`.
+
+```shell
+docker run -d \
+    --name kronk \
+    --restart unless-stopped \
+    -e KRONK_AUTH_LOCAL_ENABLED=true \
+    -p 11435:11435 \
+    -v kronk-data:/kronk \
+    ghcr.io/ardanlabs/kronk:latest
+```
+
+Only the API port `11435` is published; the debug/metrics port `11445`
+is intentionally left unpublished so it is not reachable from the
+network. A bind mount (`-v /srv/kronk:/kronk`) works too, but requires
+`sudo chown -R 10001:10001 /srv/kronk` first since the container is
+non-root. Verify it is up:
+
+```shell
+curl http://localhost:11435/v1/liveness
+docker logs -f kronk
+```
+
+**User security.** The `KRONK_AUTH_LOCAL_ENABLED=true` above turns on
+the embedded JWT auth. On first start Kronk generates a master key and a
+10-year admin token under `/kronk/keys/`. Retrieve the admin token, then
+use it to mint scoped user tokens — never hand out the admin token
+itself:
+
+```shell
+# Admin token (treat like a root password)
+docker exec kronk cat /kronk/keys/master.jwt
+
+# Mint a 30-day, rate-limited user token for clients
+docker exec \
+  -e KRONK_TOKEN="$(docker exec kronk cat /kronk/keys/master.jwt)" \
+  kronk kronk security token create \
+    --duration 720h \
+    --endpoints "chat-completions:1000/day,embeddings:500/day"
+```
+
+Even with auth on, restrict port `11435` to trusted networks and
+terminate TLS at a reverse proxy — Kronk serves plain HTTP. See
+[Chapter 12: Security & Authentication](chapter-12-security-authentication.md)
+for key rotation, endpoint/limit syntax, and standalone-auth mode.
+
+**Auto-restart on reboot.** The `--restart unless-stopped` flag already
+brings the container back after a daemon restart or host reboot, as long
+as Docker starts on boot (`sudo systemctl enable docker`). To manage
+Kronk as a first-class service with journald logging and ordering, use a
+systemd unit at `/etc/systemd/system/kronk.service` instead of the
+restart policy:
+
+```ini
+[Unit]
+Description=Kronk LLM inference server
+Requires=docker.service
+After=docker.service
+
+[Service]
+Restart=always
+RestartSec=5
+ExecStartPre=-/usr/bin/docker rm -f kronk
+ExecStart=/usr/bin/docker run --rm --name kronk \
+  -e KRONK_AUTH_LOCAL_ENABLED=true \
+  -p 11435:11435 \
+  -v kronk-data:/kronk \
+  ghcr.io/ardanlabs/kronk:latest
+ExecStop=/usr/bin/docker stop kronk
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```shell
+sudo systemctl daemon-reload
+sudo systemctl enable --now kronk
+journalctl -u kronk -f
+```
+
+Use **either** the `--restart` policy **or** the systemd unit, not
+both — with systemd the container is `--rm` and systemd owns its
+lifecycle.
+
+**Preinstalling models.** Pull models into the running container so the
+box is ready immediately and can run offline. Because state lives on the
+volume, models pulled once persist across updates and reboots. The
+`KRONK_DOWNLOAD_ENABLED=false` default only blocks downloads triggered
+from the browser UI; CLI `model pull` works regardless:
+
+```shell
+docker exec kronk kronk model pull unsloth/Qwen3-0.6B-Q8_0 --local
+docker exec kronk kronk catalog list --local
+
+# Whisper (Bucky) audio model
+docker exec kronk kronk bucky model pull ggml-tiny.bin
+```
+
+**Updating the image.** Data lives on the `kronk-data` volume, so
+updating is pull-and-recreate — models and keys are untouched. Pin a
+specific version tag in production so restarts are reproducible.
+
+```shell
+docker pull ghcr.io/ardanlabs/kronk:latest
+
+# plain docker: recreate with the same run command
+docker stop kronk && docker rm kronk
+# docker run -d ... (as above)
+
+# systemd deployment
+sudo systemctl restart kronk
+
+# verify
+docker exec kronk kronk version
+curl http://localhost:11435/v1/liveness
+```
+
+**Uninstalling.** Stop and remove the container, image, and — only if
+you no longer need your models and tokens — the volume. Removing the
+volume is irreversible.
+
+```shell
+# systemd deployment
+sudo systemctl disable --now kronk
+sudo rm /etc/systemd/system/kronk.service && sudo systemctl daemon-reload
+
+# plain docker deployment
+docker stop kronk && docker rm kronk
+
+docker rmi ghcr.io/ardanlabs/kronk:latest
+docker volume rm kronk-data   # deletes all models, catalog, and keys
+```
+
+**Google Cloud Run.** Kronk is a standard OCI image; deploy it per the
+[Cloud Run docs](https://docs.cloud.google.com/run/docs/deploying). Cloud
+Run terminates TLS, routes one port, and gives every instance an
+**ephemeral** filesystem — `/kronk` does not survive a new revision or
+cold start.
+
+CPU-only service (Kronk listens on `11435` by default):
+
+```shell
+gcloud run deploy kronk \
+    --image=ghcr.io/ardanlabs/kronk:latest \
+    --region=us-central1 --port=11435 \
+    --cpu=8 --memory=32Gi \
+    --timeout=3600 --concurrency=4 \
+    --min-instances=1 --no-cpu-throttling
+```
+
+- `--port=11435` — the default listen port; the debug port `11445` is not routed.
+- `--timeout=3600` — Cloud Run max (60m), matching Kronk's `WriteTimeout` default.
+- `--min-instances=1 --no-cpu-throttling` — keep the model resident; scale-to-zero reloads it on every cold start.
+
+**Models.** `KRONK_DOWNLOAD_ENABLED` is `false` and the filesystem is
+ephemeral, so bake the model into a derived image:
+
+```dockerfile
+FROM ghcr.io/ardanlabs/kronk:latest
+RUN kronk model pull unsloth/Qwen3-0.6B-Q8_0 --local --base-path /kronk
+```
+
+Or mount a bucket at `/kronk/models` — see
+[Cloud Storage volume mounts](https://docs.cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts).
+GCS FUSE is unsuitable for badger state (catalog, keys); bake that in.
+
+**Auth.** Gate at the edge with Cloud Run IAM (`--no-allow-unauthenticated`
++ `roles/run.invoker`), or use Kronk JWT
+(`--set-env-vars=KRONK_AUTH_LOCAL_ENABLED=true`) with keys baked in — a new
+revision otherwise regenerates them. See
+[Chapter 12](chapter-12-security-authentication.md).
+
+**GPU (NVIDIA L4).** Deploy the `-cuda` image with an attached GPU in a
+[supported region](https://docs.cloud.google.com/run/docs/configuring/services/gpu)
+(min 4 CPU / 16 GiB); Kronk auto-selects the `cuda` backend.
+
+```shell
+gcloud run deploy kronk \
+    --image=ghcr.io/ardanlabs/kronk:latest-cuda \
+    --region=us-central1 --port=11435 \
+    --cpu=8 --memory=32Gi \
+    --gpu=1 --gpu-type=nvidia-l4 --no-cpu-throttling \
+    --timeout=3600 --concurrency=4 \
+    --min-instances=1 --max-instances=1
+```
+
+Cloud Run requires `--max-instances` to be set when a GPU is attached.
 
 ### 2.5 Installing Libraries
 
